@@ -1,119 +1,120 @@
+local utils = require("tinker.utils")
 local M = {}
 
 ---@class tinker.Options
+---@field php_executable string: The php_executable that will be used to run the cmd
 ---@field cmd string: The cmd that will be used to run the tinker
----@field split_direction string: Window split direction: 'horizontal', 'vertical', or 'tab'
+---@field buffer_split_direction string: Window split direction: 'horizontal', 'vertical', or 'tab'
+---@field results_split_direction string: Window split direction: 'horizontal', 'vertical', or 'tab'
+---@field keymaps table<string, string>: Keymaps to use for tinker.nvim
 
 ---@type tinker.Options
 local options = {
-  cmd = "php artisan tinker",
-  split_direction = "horizontal",
+  php_executable = "php",
+  cmd = "artisan tinker",
+  keymaps = {
+    run_tinker = "<leader>tr",
+    create_scratch = "<leader>ts",
+  },
+  buffer_split_direction = "horizontal",
+  results_split_direction = "vertical",
 }
 
 --- Setup the plugin
----@param opts present.Options
+---@param opts tinker.Options
 M.setup = function(opts)
-  options = vim.tbl_deep_extend("force", opts or {})
+  options = vim.tbl_deep_extend("force", options, opts or {})
+
+  -- Setup global keymap for creating scratch buffer
+  if options.keymaps.create_scratch then
+    vim.keymap.set("n", options.keymaps.create_scratch, function()
+      M.create_scratch_buffer()
+    end, { desc = "Create PHP Tinker scratch buffer" })
+  end
 end
 
-M.scratch_buffers = {}
+M.get_php_executable = function()
+  return options.php_executable
+end
+
 M.result_buf = nil
 
-M.health = function() end
-
-function M.create_scratch_buffer()
-  local project_root = vim.fn.getcwd()
-
-  local search_dir = vim.fn.expand("%:p:h")
-  while search_dir ~= "/" and search_dir ~= "" do
-    if vim.fn.filereadable(search_dir .. "/artisan") == 1 then
-      project_root = search_dir
-      break
-    end
-    search_dir = vim.fn.fnamemodify(search_dir, ":h")
+local function create_split(split_direction)
+  if split_direction == "vertical" then
+    vim.cmd("vsplit")
+  elseif split_direction == "horizontal" then
+    vim.cmd("split")
+  elseif split_direction == "tab" then
+    vim.cmd("tabnew")
+  else
+    vim.cmd("split") -- default to horizontal
   end
+end
 
-  if vim.fn.filereadable(project_root .. "/artisan") == 0 then
-    if vim.fn.filereadable(vim.fn.getcwd() .. "/artisan") == 1 then
-      project_root = vim.fn.getcwd()
-    else
-      vim.notify("Warning: No Laravel project detected. Creating scratch buffer anyway.", vim.log.levels.WARN)
-    end
-  end
+local function create_buffer_split()
+  create_split(options.buffer_split_direction)
+end
 
-  -- Define the scratch file path
+local function create_results_split()
+  create_split(options.results_split_direction)
+end
+
+local function get_scratch_file_path(project_root)
   local scratch_dir = project_root .. "/vendor/_tinker_nvim_ide"
   local scratch_file = scratch_dir .. "/scratch.php"
-
-  -- Create the directory if it doesn't exist
   vim.fn.mkdir(scratch_dir, "p")
+  return scratch_file
+end
 
-  -- Check if we already have a buffer open for this scratch file
-  local existing_buf_id = vim.fn.bufnr(scratch_file)
-  if existing_buf_id ~= -1 and vim.api.nvim_buf_is_valid(existing_buf_id) then
-    -- Find if the buffer is already open in a window
-    local win_id = vim.fn.bufwinid(existing_buf_id)
-    if win_id ~= -1 then
-      -- Buffer is already open, just focus it
-      vim.api.nvim_set_current_win(win_id)
-      -- vim.notify('Switched to existing scratch buffer for project: ' .. vim.fn.fnamemodify(project_root, ':t'),
-      --     vim.log.levels.INFO)
-      return existing_buf_id
-    else
-      -- Buffer exists but not open, open it in a new window
-      vim.cmd("split")
-      vim.api.nvim_win_set_buf(0, existing_buf_id)
-
-      vim.keymap.set("n", "<leader>tr", M.run_tinker, {
-        buffer = existing_buf_id,
-        desc = "Run PHP code in artisan tinker",
-      })
-      -- vim.notify('Reopened existing scratch buffer for project: ' .. vim.fn.fnamemodify(project_root, ':t'),
-      --     vim.log.levels.INFO)
-      return existing_buf_id
-    end
-  end
-
-  -- Create the scratch file if it doesn't exist
+local function create_initial_scratch_file(scratch_file)
   if vim.fn.filereadable(scratch_file) == 0 then
-    local initial_content = {
-      "<?php",
-      "",
-    }
-
+    local initial_content = { "<?php", "" }
     vim.fn.writefile(initial_content, scratch_file)
   end
+end
 
-  vim.cmd("split")
-  vim.cmd("edit " .. vim.fn.fnameescape(scratch_file))
-
-  local buf_id = vim.api.nvim_get_current_buf()
-
-  -- Set buffer options
-  vim.api.nvim_set_option_value("filetype", "php", { buf = buf_id })
-
-  M.scratch_buffers = M.scratch_buffers or {}
-  M.scratch_buffers[project_root] = {
-    buf_id = buf_id,
-    project_root = project_root,
-    file_path = scratch_file,
-  }
-
-  vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-    buffer = buf_id,
-    callback = function()
-      if M.scratch_buffers then
-        M.scratch_buffers[project_root] = nil
-      end
-    end,
-    once = true,
-  })
-
-  -- Set up the tinker run keybinding
-  vim.keymap.set("n", "<leader>tr", M.run_tinker, {
+local function setup_scratch_buffer_keymap(buf_id)
+  vim.keymap.set("n", options.keymaps.run_tinker, M.run_tinker, {
     buffer = buf_id,
     desc = "Run PHP code in artisan tinker",
   })
+end
+
+local function handle_existing_buffer(existing_buf_id)
+  local win_id = vim.fn.bufwinid(existing_buf_id)
+  if win_id ~= -1 then
+    vim.api.nvim_set_current_win(win_id)
+    return existing_buf_id
+  else
+    create_buffer_split()
+    vim.api.nvim_win_set_buf(0, existing_buf_id)
+    setup_scratch_buffer_keymap(existing_buf_id)
+    return existing_buf_id
+  end
+end
+
+function M.create_scratch_buffer()
+  local project_root = utils.find_laravel_project()
+  if not project_root then
+    vim.notify("Error: No Laravel project detected. Cannot create scratch buffer.", vim.log.levels.ERROR)
+    return
+  end
+
+  local scratch_file = get_scratch_file_path(project_root)
+
+  local existing_buf_id = vim.fn.bufnr(scratch_file)
+  if existing_buf_id ~= -1 and vim.api.nvim_buf_is_valid(existing_buf_id) then
+    return handle_existing_buffer(existing_buf_id)
+  end
+
+  create_initial_scratch_file(scratch_file)
+  create_buffer_split()
+  vim.cmd("edit " .. vim.fn.fnameescape(scratch_file))
+
+  local buf_id = vim.api.nvim_get_current_buf()
+  vim.api.nvim_set_option_value("filetype", "php", { buf = buf_id })
+
+  setup_scratch_buffer_keymap(buf_id)
 
   return buf_id
 end
@@ -178,60 +179,68 @@ local function ensure_exit_statement(lines)
   return lines
 end
 
--- Execute PHP code in artisan tinker
-function M.run_tinker()
-  local current_buf = vim.api.nvim_get_current_buf()
-
-  -- Find the project root (look for artisan file)
-  local project_root = vim.fn.getcwd()
-  local current_dir = vim.fn.expand("%:p:h")
-
-  -- Walk up the directory tree to find artisan file
-  local search_dir = current_dir
-  while search_dir ~= "/" and search_dir ~= "" do
-    if vim.fn.filereadable(search_dir .. "/artisan") == 1 then
-      project_root = search_dir
-      break
-    end
-    search_dir = vim.fn.fnamemodify(search_dir, ":h")
-  end
-
-  if vim.fn.filereadable(project_root .. "/artisan") == 0 then
-    vim.notify("Error: artisan file not found. Make sure you are in a Laravel project root.", vim.log.levels.ERROR)
-    return
-  end
-
-  local lines = vim.api.nvim_buf_get_lines(current_buf, 0, -1, false)
-
+local function get_buffer_content(buf_id)
+  local lines = vim.api.nvim_buf_get_lines(buf_id, 0, -1, false)
   lines = ensure_exit_statement(lines)
+  return table.concat(lines, "\n")
+end
 
-  local content = table.concat(lines, "\n")
-
-  local results_buf = reset_or_create_output_buf()
-
-  -- Open results buffer in a split if not already visible
+local function setup_results_window(results_buf)
   local results_win = vim.fn.bufwinid(results_buf)
   if results_win == -1 then
-    vim.cmd("vsplit")
+    create_results_split()
     vim.api.nvim_win_set_buf(0, results_buf)
   end
+end
 
-  local temp_file = write_temp_file(content)
+local function build_tinker_command(project_root, temp_file)
+  return string.format(
+    "cd %s && %s %s %s",
+    vim.fn.shellescape(project_root),
+    options.php_executable,
+    options.cmd,
+    vim.fn.shellescape(temp_file)
+  )
+end
 
-  local cmd =
-      string.format("cd %s && %s %s", vim.fn.shellescape(project_root), options.cmd, vim.fn.shellescape(temp_file))
-
-  vim.fn.jobstart(cmd, {
+local function create_job_callbacks(current_buf, temp_file)
+  return {
     term = true,
-    buf = results_buf,
     on_stdout = function(_, data, _)
       vim.schedule(function()
         local current_win = vim.fn.bufwinid(current_buf)
         vim.api.nvim_set_current_win(current_win)
       end)
     end,
-    on_exit = function(_, exit_code) end,
-  })
+    on_exit = function(_, exit_code)
+      if temp_file and vim.fn.filereadable(temp_file) == 1 then
+        vim.fn.delete(temp_file)
+      end
+    end,
+  }
+end
+
+-- Execute PHP code in artisan tinker
+function M.run_tinker()
+  local current_buf = vim.api.nvim_get_current_buf()
+
+  local project_root = utils.find_laravel_project()
+  if not project_root then
+    vim.notify("Error: artisan file not found. Make sure you are in a Laravel project root.", vim.log.levels.ERROR)
+    return
+  end
+
+  local content = get_buffer_content(current_buf)
+  local results_buf = reset_or_create_output_buf()
+
+  setup_results_window(results_buf)
+
+  local temp_file = write_temp_file(content)
+  local cmd = build_tinker_command(project_root, temp_file)
+  local job_opts = create_job_callbacks(current_buf, temp_file)
+  job_opts.buf = results_buf
+
+  vim.fn.jobstart(cmd, job_opts)
 end
 
 return M
